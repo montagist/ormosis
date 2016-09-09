@@ -22,11 +22,6 @@ SomeClass.prototype._ormosis = { idField: "_id",
 								 collection: "SomeClass",
 								 db: "someDB" };
 
-
-var tt = new SomeClass();
-var p = orm.wrapObj( tt );
-p.heyhey = "stuff";
-
 describe('Classes', function() {
 
 	describe( 'idField specified in _ormosis meta', function() {
