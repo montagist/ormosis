@@ -2,7 +2,7 @@
   "name": "ormosis",
   "version": "0.1.0",
   "description": "A transparent ORM-like utility for automatically persisting class and object instances to MongoDB.",
-  "author":"montagist <montagist@gmail.com>",
+  "author": "montagist <montagist@gmail.com>",
   "scripts": {
     "test": "mocha",
     "prepublish": ""
@@ -13,7 +13,7 @@
     "url": "https://github.com/montagist/ormosis.git"
   },
   "bugs": {
-    url: "https://github.com/montagist/ormosis.git/issues"
+    "url": "https://github.com/montagist/ormosis.git/issues"
   },
   "keywords": [
     "mongodb",
@@ -23,9 +23,14 @@
     "transparent"
   ],
   "dependencies": {
-    "mongodb": "^2.2.9"
+    "bluebird": "^3.4.6",
+    "fifo": "^2.3.0",
+    "mongodb": "^2.2.9",
+    "object-pool": "^0.2.0"
   },
   "devDependencies": {
-    "mocha": "^3.0.2"
+    "mocha": "^3.0.2",
+    "node-inspector": "^0.12.8",
+    "sleep": "*"
   }
 }
