@@ -131,6 +131,9 @@ var Ormosis = function() {
 		
 		var orm = this;
 
+		/* Instantiating new ObjectID on wrapping, even if no insertion
+			which will help group writes before initial inserts
+			and alleviate need to match up IDs after the CRUD op */
 		if ( !orm._getIDVal( obj ) )
 			obj[ orm._getIDField( obj ) ] = new ObjectID();
 
