@@ -1,21 +1,36 @@
 var mongodb = require('mongodb');
+var ObjectID = mongodb.ObjectID;
 
 var MongoClient = mongodb.MongoClient;
 
 var crypto = require('crypto');
-var utilFuncs = require('./utilFuncs');
+var pool = require('object-pool');
+
+var P = require('bluebird');
+var fifo = require('fifo');
+
+
+
 
 //TODO: Method that turns constructor into callback/promise-maker that queries db for 
 //		said items and populates their values after instantiation, as long as there is
 //		a reference to the _id prop immediate  after instantiation
 
-//TODO: Easily consumed JSON file logs on errors
-//TODO: Methods for listing object properties ( own vs prototypes )
-//TODO: Methods for updating arrays that only describe first object
-//TODO: Method/util for wrapping in Proxys and holding their references
-//TODO: Batched CRUD operations at intervals
+//TODO: Easily consumed JSON file logs on db writing errors
+
+//TODO: config options for distinction btwn. own vs prototype properties
+
+//TODO: Batched CRUD operations at intervals (and/or debounced?)
+
 //TODO: Lazy loading of properties & arrays from server?
 
+//TODO: Flush updates instead of doing all
+
+//TODO: Some strategy for Arrays and nested objs
+
+//TODO: Class instance factory that connects to stream from db
+
+//TODO: Writes batched by time, number, ...
 
 /*
 	
@@ -48,115 +63,156 @@ var utilFuncs = require('./utilFuncs');
 		},						// the module level at instantiation
 		collection: "",			// Defaults to {}.constructor.name
 		depth: 1,				// 
-		ignoreBlanks: true		// 
+		ignoreBlanks: true
+		customID: false,
+		customIDFactory: function
 	};	
 	
 */
 
 var Ormosis = function() {
 	
-	this.crudNerve = null;
 	this.objProxies = [];
-	this.updateQueue = [];
-	this.updateQObjMirr = [];
+	this.updateQueue = [];	//fifo();
 	this.collectionsMap = {};	// Probably don't want a bunch of Collection instances
-	this.db = 
+	this.db = null;
 	
 	this.props2Crud = {};
-	this.upDoc = {};
-	
-	
-	var ref = this;
+
+	var _ref = this;
 	
 	MongoClient.connect( 'mongodb://localhost:27017/myproject', {}, function( err, db ) {
 		
-		ref.db = db;
+		_ref.db = db;
 	} );
 	
-	this.clearObj = function( dedObj ) {
-		
-		for ( var varKey in dedObj ) {
-			
-		    if ( dedObj.hasOwnProperty( varKey ) )
-		        delete dedObj[varKey];
-		}
-	}
+	this.objPool = pool( { init: function() { return {}; },
+							enable: function( obj ) {		
+								for ( var vk in obj ) {
+								    if ( obj.hasOwnProperty( vk ) )
+								        delete obj[vk];
+								}
+							},
+							initSize: 100 } );	
 	
-	this.save = function( obj, db, fincb ) {
-		
-		var meta = obj._ormosis;
-
-		//TODO: Provide means of running on all defaults despite missing meta _ormosis property
-		if ( !meta )
-			return;
-
-		if ( !meta.collection )
-			meta.collection = obj.constructor.name;
-			
-		var collection = db.collection( meta.collection )
-
-		// Attempting to use only one obj to avoid allocating many
-		var newProps = this.props2Crud;
-		this.clearObj( newProps );
-
-		// Using separate obj ref to delete _ormosis
-		newProps = Object.assign( newProps, obj );	//TODO: diff. copy mechanism, won't follow prototype chain
-		delete newProps._ormosis;
-		
-		collection.insertMany( [ newProps ], {}, function( err, docs ) {
-			
-			if ( err )
-				throw err;
-
-			//TODO: check for _ormosis, may be missing defaults may be in place
-			if ( !obj._id )
-				obj._id = docs.ops[0]._id;
-			
-			if ( fincb )
-				fincb.apply( this, arguments );
-			
-		} );
-	};
 	
-	this.wrapObj = function( obj ) {
-		
-		var orm = this;
 
-		var np = new Proxy( obj, this.objModifyHandler );
-		this.objProxies.push( np );
-		return np;
-	}
+
 	
 	this.wrapConstructor = function( theConFunc ) {
 		
+		var orm = this;
 		
+		return function() {
+			
+			var args = Array.prototype.slice.call( arguments );
+			
+			var fincb = args[ args.length - 1 ],
+				query = args[ args.length - 2 ];
+				
+			args = args.slice( 0, args.length - 2 );
+				
+			var collection = orm.db.collection( theConFunc.name );  //theConFunc._ormosis.collection );
+			
+			collection.find( query ).toArray( function( e, r ) {
+				
+				var ormClassInstances = [];
+			
+				for ( var i = 0; i < r.length; i++ )
+					ormClassInstances.push( orm._new( theConFunc, r[ i ], args ) );
+					
+				fincb( e, ormClassInstances );
+
+			} );
+		}
+	}
+	
+	this.wrapObj = function( obj, ormOpts ) {
+		
+		var orm = this;
+
+		if ( !orm._getIDVal( obj ) )
+			obj[ orm._getIDField( obj ) ] = new ObjectID();
+
+		var np = new Proxy( obj, orm.objModifyHandler );
+		orm.objProxies.push( np );
+		return np;
 	}
 
-	this.processQueue = function( meta ) {
+	this._new = function( func, ormObj, conParams ) {
+	
+		var res = ormObj || {};
 		
+	    if ( func.prototype !== null )
+	        res.__proto__ = func.prototype;
+
+	    var ret = func.apply( res, conParams );
+
+	    if ( ( typeof ret === "object" || typeof ret === "function" ) && ret !== null )
+	        return ret;
+
+		return res;
+	}
+	
+	this._prepQueue = function() {
+		
+		/*
+		var upQ = this.updateQueue,
+			retArr = [];
+
+		for ( var node = upQ.node; node; node = upQ.shift() )
+			retArr.push( retArr.value );
+			
+		return retArr;
+		*/
+		
+		return this.updateQueue;
+	};
+	
+	
+	this._getIDVal = function( obj ) {
+		
+		return obj[ this._getIDField( obj ) ];
+	}
+	
+	this._getIDField = function( obj ) {
+		
+		return obj._ormosis.customID || "_id";
+	}
+	
+	this._getCollection = function( obj ) {
+		
+		
+	}
+	
+	this._prepObj = function( obj, _optField ) {
+			
+		if ( _optField )
+			return this.objPool.create()[ _optField ] = obj[ _optField ];
+
+		var newProps = Object.assign( this.objPool.create(), obj );
+		delete newProps._ormosis;
+		return newProps;	
+	}
+
+	this._processQueue = function( meta, fincb ) {
+
 		var collection = this.db.collection( meta.collection )
 			orm = this;
 		
-		console.log( this.updateQueue );
-		
-		collection.bulkWrite( this.updateQueue, {}, function( e, r ) {
-			
-			var idArr = r.getInsertedIds();
-			
-			for ( var i = 0; i < idArr.length; i++ )
-				orm.updateQObjMirr[ idArr[ i ].index ]._id = idArr[ i ]._id;
-				
-			orm.updateQueue = [];
-			orm.updateQObjMirr = [];
+		collection.bulkWrite( this._prepQueue(), 
+							  this.objPool.create(), 
+							  function( e, r ) {
 
+			if ( fincb ) fincb( e, r );
 		} );
 	}	
 	
-	// this only deals w/ one object at a time
+
 	this.objModifyHandler = {
 		
 		orm: this,	// instance ref. for handler methods
-		
+			
 		get: function ( oTarget, sKey ) {
 			
 			return oTarget[sKey] || undefined;
@@ -166,30 +222,27 @@ var Ormosis = function() {
 			
 			var res = oTarget[ sKey ] = vValue;
 			
-			if ( sKey == "_id" )
+			if ( !res || sKey == orm._getIDField( oTarget ) )
 				return res;
-			
-			// Using separate obj ref to delete _ormosis
-			var newProps = {};			// TODO: change to object pool
-			Object.assign( newProps, oTarget );
-			delete newProps._ormosis;
 
-			var upQ = this.orm.updateQueue;
-			
-			console.log( newProps );
-			
-			if ( !oTarget._id ) {		// TODO: optimize to not do this check on every obj write
-			
-				upQ.push( { insertOne: { document: newProps } } );
-			
-			} else {
+			var newProps = this.orm._prepObj( oTarget ),
+				upQ = this.orm.updateQueue,
+				n = this.orm.objPool.create;
 				
-				upQ.push( { updateOne: { filter: {_id: new mongodb.ObjectID(newProps._id) }, update: {$set: newProps}, upsert:true } } );
-			}
+			var upDoc = n();
+			upDoc.updateOne = n();
+			upDoc.updateOne.upsert = true;
+			upDoc.updateOne.filter = n();
+			upDoc.updateOne.filter[ orm._getIDField( oTarget ) ] = new ObjectID( newProps[ orm._getIDField( oTarget ) ] );
+			upDoc.updateOne.update = n();
+			upDoc.updateOne.update[ '$set' ] = newProps;
 			
-			this.orm.updateQObjMirr.push( oTarget );
-						
-			this.orm.processQueue( oTarget._ormosis );
+			
+			//upQ.push( { updateOne: { filter: {_id: new mongodb.ObjectID(newProps._id) }, update: {$set: newProps}, upsert:true } } );
+			
+			upQ.push( upDoc );
+			
+			this.orm._processQueue( oTarget._ormosis );
 			
 			return res;
 		},
@@ -199,7 +252,7 @@ var Ormosis = function() {
 			var unset = { $unset: {} };
 			unset["$unset"][ sKey ] = "";
 		
-			this.orm.updateQueue.push( { updateOne: { filter: {_id: new mongodb.ObjectID(oTarget._id) }, update: unset } } );
+			this.orm.updateQueue.push( { updateOne: { filter: {_id: new mongodb.ObjectID(oTarget[ orm._getIDField( oTarget ) ]) }, update: unset } } );
 			
 			this.orm.processQueue( oTarget._ormosis );
 			
