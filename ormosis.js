@@ -32,6 +32,8 @@ var fifo = require('fifo');
 
 //TODO: Writes batched by time, number, ...
 
+//TODO: Optionally -execute- constructor in constructor-based collection query
+
 /*
 	
 	// module level basis?
@@ -86,7 +88,7 @@ var Ormosis = function() {
 		_ref.db = db;
 	} );
 	
-	this.objPool = pool( { init: function() { return {}; },
+	this._objPool = pool( { init: function() { return {}; },
 							enable: function( obj ) {		
 								for ( var vk in obj ) {
 								    if ( obj.hasOwnProperty( vk ) )
@@ -95,11 +97,7 @@ var Ormosis = function() {
 							},
 							initSize: 100 } );	
 	
-	
-
-
-	
-	this.wrapConstructor = function( theConFunc ) {
+	this.wrapCon = function( theConFunc ) {
 		
 		var orm = this;
 		
@@ -110,8 +108,6 @@ var Ormosis = function() {
 			var fincb = args[ args.length - 1 ],
 				query = args[ args.length - 2 ];
 				
-			args = args.slice( 0, args.length - 2 );
-				
 			var collection = orm.db.collection( theConFunc.name );  //theConFunc._ormosis.collection );
 			
 			collection.find( query ).toArray( function( e, r ) {
@@ -119,11 +115,15 @@ var Ormosis = function() {
 				var ormClassInstances = [];
 			
 				for ( var i = 0; i < r.length; i++ )
-					ormClassInstances.push( orm._new( theConFunc, r[ i ], args ) );
+					ormClassInstances.push( orm.wrapObj( orm._new( theConFunc, r[ i ], args.slice( 0, args.length - 2 ) ) ) );
 					
 				fincb( e, ormClassInstances );
 
 			} );
+			
+			// Return a Promise if no callback passed
+			//if ( typeof fincb != "function" )
+			//	void(0);	// Return promise
 		}
 	}
 	
@@ -131,18 +131,25 @@ var Ormosis = function() {
 		
 		var orm = this;
 
-		/* Instantiating new ObjectID on wrapping, even if no insertion
-			which will help group writes before initial inserts
-			and alleviate need to match up IDs after the CRUD op */
+		// Instantiating new ObjectID on wrapping to help group writes before
+		// initial inserts and alleviate need to match up IDs after the CRUD op
 		if ( !orm._getIDVal( obj ) )
 			obj[ orm._getIDField( obj ) ] = new ObjectID();
 
-		var np = new Proxy( obj, orm.objModifyHandler );
+		var np = new Proxy( obj, orm._objModifyHandler );
 		orm.objProxies.push( np );
 		return np;
 	}
 
+	/*
+		Method for controlled instantiation of new Class...
+			- w/ pre-existing Object
+			- w/ specified ARGS array
+	*/
 	this._new = function( func, ormObj, conParams ) {
+	
+		// Culled from:
+		// http://stackoverflow.com/questions/1646698/what-is-the-new-keyword-in-javascript
 	
 		var res = ormObj || {};
 		
@@ -156,22 +163,6 @@ var Ormosis = function() {
 
 		return res;
 	}
-	
-	this._prepQueue = function() {
-		
-		/*
-		var upQ = this.updateQueue,
-			retArr = [];
-
-		for ( var node = upQ.node; node; node = upQ.shift() )
-			retArr.push( retArr.value );
-			
-		return retArr;
-		*/
-		
-		return this.updateQueue;
-	};
-	
 	
 	this._getIDVal = function( obj ) {
 		
@@ -189,11 +180,13 @@ var Ormosis = function() {
 	}
 	
 	this._prepObj = function( obj, _optField ) {
-			
-		if ( _optField )
-			return this.objPool.create()[ _optField ] = obj[ _optField ];
 
-		var newProps = Object.assign( this.objPool.create(), obj );
+		if ( _optField ){
+			var ob = {};
+			ob[ _optField ] = obj[ _optField ];
+			return ob;
+		}
+		var newProps = Object.assign( {}, obj );
 		delete newProps._ormosis;
 		return newProps;	
 	}
@@ -203,8 +196,8 @@ var Ormosis = function() {
 		var collection = this.db.collection( meta.collection )
 			orm = this;
 		
-		collection.bulkWrite( this._prepQueue(), 
-							  this.objPool.create(), 
+		collection.bulkWrite( orm.updateQueue, 
+							  {},
 							  function( e, r ) {
 
 			if ( fincb ) fincb( e, r );
@@ -212,7 +205,7 @@ var Ormosis = function() {
 	}	
 	
 
-	this.objModifyHandler = {
+	this._objModifyHandler = {
 		
 		orm: this,	// instance ref. for handler methods
 			
@@ -225,25 +218,16 @@ var Ormosis = function() {
 			
 			var res = oTarget[ sKey ] = vValue;
 			
-			if ( !res || sKey == orm._getIDField( oTarget ) )
+			if ( sKey == orm._getIDField( oTarget ) )
 				return res;
 
 			var newProps = this.orm._prepObj( oTarget ),
 				upQ = this.orm.updateQueue,
-				n = this.orm.objPool.create;
-				
-			var upDoc = n();
-			upDoc.updateOne = n();
-			upDoc.updateOne.upsert = true;
-			upDoc.updateOne.filter = n();
-			upDoc.updateOne.filter[ orm._getIDField( oTarget ) ] = new ObjectID( newProps[ orm._getIDField( oTarget ) ] );
-			upDoc.updateOne.update = n();
-			upDoc.updateOne.update[ '$set' ] = newProps;
+				filterInnards = {};
+
+			filterInnards[ orm._getIDField( oTarget ) ] = new ObjectID( newProps[ orm._getIDField( oTarget ) ] );
 			
-			
-			//upQ.push( { updateOne: { filter: {_id: new mongodb.ObjectID(newProps._id) }, update: {$set: newProps}, upsert:true } } );
-			
-			upQ.push( upDoc );
+			upQ.push( { updateOne: { filter: filterInnards, update: {$set: newProps}, upsert:true } } );
 			
 			this.orm._processQueue( oTarget._ormosis );
 			
